@@ -1,0 +1,54 @@
+name: Deploy WASM
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.74
+
+      - name: Configure
+        run: emcmake cmake -B build_wasm -S wasm -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build_wasm
+
+      - name: Prepare deploy
+        run: |
+          mkdir -p _site
+          cp build_wasm/celsmooth.html _site/index.html
+          cp build_wasm/celsmooth.js   _site/
+          cp build_wasm/celsmooth.wasm _site/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

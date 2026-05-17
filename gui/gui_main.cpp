@@ -17,6 +17,11 @@
 #include <cstdio>
 #include <algorithm>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <emscripten/html5.h>
+#endif
+
 // --- Application state ---
 
 struct AppState {
@@ -119,8 +124,91 @@ static void process_image(AppState& state) {
     state.params_dirty = false;
 }
 
+// --- WASM file I/O ---
+
+#ifdef __EMSCRIPTEN__
+static AppState* g_wasm_state = nullptr;
+
+extern "C" EMSCRIPTEN_KEEPALIVE void wasm_receive_file(const char* path) {
+    if (g_wasm_state) {
+        load_image(*g_wasm_state, path);
+    }
+}
+
+static void open_file_dialog() {
+    EM_ASM({
+        var input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        input.onchange = function(e) {
+            var file = e.target.files[0];
+            if (!file) return;
+            var reader = new FileReader();
+            reader.onload = function() {
+                var data = new Uint8Array(reader.result);
+                var path = '/tmp/' + file.name;
+                try { FS.unlink(path); } catch(e) {}
+                FS.writeFile(path, data);
+                var pathPtr = stringToNewUTF8(path);
+                Module._wasm_receive_file(pathPtr);
+                _free(pathPtr);
+            };
+            reader.readAsArrayBuffer(file);
+        };
+        input.click();
+    });
+}
+
+static void wasm_download_image(AppState& state) {
+    // Encode PNG to memory
+    struct PngBuf { std::vector<uint8_t> data; };
+    PngBuf buf;
+    stbi_write_png_to_func([](void* ctx, void* data, int size) {
+        auto* b = static_cast<PngBuf*>(ctx);
+        auto* bytes = static_cast<uint8_t*>(data);
+        b->data.insert(b->data.end(), bytes, bytes + size);
+    }, &buf, state.img_w, state.img_h, 4, state.pixels_out.data(), state.img_w * 4);
+
+    // Extract filename for download
+    std::string filename = "celsmooth_output.png";
+    if (!state.img_path.empty()) {
+        size_t slash = state.img_path.find_last_of("/\\");
+        std::string base = (slash != std::string::npos)
+            ? state.img_path.substr(slash + 1) : state.img_path;
+        size_t dot = base.rfind('.');
+        if (dot != std::string::npos)
+            base.insert(dot, "_celsmooth");
+        else
+            base += "_celsmooth.png";
+        filename = base;
+    }
+
+    // Trigger browser download
+    EM_ASM({
+        var data = new Uint8Array(HEAPU8.buffer, $0, $1);
+        var blob = new Blob([data.slice()], {type: 'image/png'});
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = UTF8ToString($2);
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }, buf.data.data(), (int)buf.data.size(), filename.c_str());
+}
+#endif
+
 static void draw_controls(AppState& state) {
     ImGui::Begin("Parameters", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+
+#ifdef __EMSCRIPTEN__
+    if (ImGui::Button("Open Image...")) {
+        open_file_dialog();
+    }
+    ImGui::Separator();
+    ImGui::Spacing();
+#endif
 
     if (state.img_w > 0) {
         ImGui::Text("Image: %s", state.img_path.c_str());
@@ -242,6 +330,13 @@ static void draw_controls(AppState& state) {
         ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f), "Output");
         ImGui::Spacing();
 
+#ifdef __EMSCRIPTEN__
+        if (ImGui::Button("Download Result")) {
+            wasm_download_image(state);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Download the processed image as PNG");
+#else
         if (ImGui::Button("Save Result")) {
             std::string out_path = make_output_path(state.img_path);
             if (stbi_write_png(out_path.c_str(), state.img_w, state.img_h, 4,
@@ -259,6 +354,7 @@ static void draw_controls(AppState& state) {
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.5f, 1.0f), "Saved!");
             ImGui::TextWrapped("%s", state.last_save_path.c_str());
         }
+#endif
     }
 
     ImGui::End();
@@ -270,11 +366,16 @@ static void draw_preview(AppState& state) {
 
     if (state.img_w == 0) {
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        ImVec2 text_size = ImGui::CalcTextSize("Drop an image here");
+#ifdef __EMSCRIPTEN__
+        const char* hint = "Open or drop an image to begin";
+#else
+        const char* hint = "Drop an image here";
+#endif
+        ImVec2 text_size = ImGui::CalcTextSize(hint);
         ImGui::SetCursorPos(ImVec2(
             (avail.x - text_size.x) * 0.5f,
             (avail.y - text_size.y) * 0.5f));
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Drop an image here");
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", hint);
         ImGui::End();
         return;
     }
@@ -397,27 +498,32 @@ static void draw_preview(AppState& state) {
     ImGui::End();
 }
 
-int main(int argc, char* argv[]) {
-    (void)argc; (void)argv;
+// --- Common init (shared between desktop and WASM) ---
 
+static SDL_Window* g_window = nullptr;
+static SDL_Renderer* g_renderer = nullptr;
+static AppState g_state;
+static bool g_running = true;
+
+static bool init_app(int argc, char* argv[]) {
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
-        return 1;
+        return false;
     }
 
-    SDL_Window* window = SDL_CreateWindow(
+    g_window = SDL_CreateWindow(
         "CelSmooth v0.2.0",
         1280, 800,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
-    if (!window) {
+    if (!g_window) {
         SDL_Log("CreateWindow failed: %s", SDL_GetError());
-        return 1;
+        return false;
     }
 
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
-    if (!renderer) {
+    g_renderer = SDL_CreateRenderer(g_window, nullptr);
+    if (!g_renderer) {
         SDL_Log("CreateRenderer failed: %s", SDL_GetError());
-        return 1;
+        return false;
     }
 
     // ImGui setup
@@ -427,102 +533,123 @@ int main(int argc, char* argv[]) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
+#ifdef __EMSCRIPTEN__
+    io.IniFilename = nullptr;  // no filesystem for imgui.ini in browser
+#endif
+
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 4.0f;
     style.FrameRounding = 3.0f;
     style.GrabRounding = 3.0f;
 
-    ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
-    ImGui_ImplSDLRenderer3_Init(renderer);
+    ImGui_ImplSDL3_InitForSDLRenderer(g_window, g_renderer);
+    ImGui_ImplSDLRenderer3_Init(g_renderer);
 
-    AppState state;
-    state.renderer = renderer;
+    g_state.renderer = g_renderer;
 
+#ifndef __EMSCRIPTEN__
     // Only force default layout if no imgui.ini exists yet
-    // (otherwise ImGui restores the user's saved layout)
     {
         FILE* f = fopen("imgui.ini", "r");
         if (f) {
             fclose(f);
-            state.first_frame = false;  // user has a saved layout, don't override
+            g_state.first_frame = false;
         }
     }
+#endif
 
     // Enable drag and drop
     SDL_SetEventEnabled(SDL_EVENT_DROP_FILE, true);
 
     // If launched with a file argument, load it
     if (argc > 1) {
-        load_image(state, argv[1]);
+        load_image(g_state, argv[1]);
     }
 
-    bool running = true;
-    while (running) {
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL3_ProcessEvent(&event);
-            if (event.type == SDL_EVENT_QUIT) {
-                running = false;
-            }
-            if (event.type == SDL_EVENT_DROP_FILE) {
-                load_image(state, event.drop.data);
-            }
-            if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-                running = false;
-            }
+    return true;
+}
+
+static void main_loop_body() {
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        ImGui_ImplSDL3_ProcessEvent(&event);
+        if (event.type == SDL_EVENT_QUIT) {
+            g_running = false;
         }
-
-        // Reprocess if parameters changed
-        if (state.params_dirty && !state.pixels_in.empty()) {
-            process_image(state);
+        if (event.type == SDL_EVENT_DROP_FILE) {
+            load_image(g_state, event.drop.data);
         }
-
-        // Start ImGui frame
-        ImGui_ImplSDLRenderer3_NewFrame();
-        ImGui_ImplSDL3_NewFrame();
-        ImGui::NewFrame();
-
-        // Dockspace over the whole window
-        ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
-
-        // Set up default layout on first frame (Parameters left, Preview right)
-        if (state.first_frame) {
-            state.first_frame = false;
-
-            ImGui::DockBuilderRemoveNode(dockspace_id);
-            ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
-            ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
-
-            ImGuiID left_id, right_id;
-            ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.28f, &left_id, &right_id);
-
-            ImGui::DockBuilderDockWindow("Parameters", left_id);
-            ImGui::DockBuilderDockWindow("Preview", right_id);
-            ImGui::DockBuilderFinish(dockspace_id);
+        if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+            g_running = false;
         }
+    }
 
-        draw_controls(state);
-        draw_preview(state);
+    // Reprocess if parameters changed
+    if (g_state.params_dirty && !g_state.pixels_in.empty()) {
+        process_image(g_state);
+    }
 
-        // Render
-        ImGui::Render();
-        SDL_SetRenderDrawColor(renderer, 25, 25, 25, 255);
-        SDL_RenderClear(renderer);
-        ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
-        SDL_RenderPresent(renderer);
+    // Start ImGui frame
+    ImGui_ImplSDLRenderer3_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+
+    // Dockspace over the whole window
+    ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
+
+    // Set up default layout on first frame (Parameters left, Preview right)
+    if (g_state.first_frame) {
+        g_state.first_frame = false;
+
+        ImGui::DockBuilderRemoveNode(dockspace_id);
+        ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
+
+        ImGuiID left_id, right_id;
+        ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.28f, &left_id, &right_id);
+
+        ImGui::DockBuilderDockWindow("Parameters", left_id);
+        ImGui::DockBuilderDockWindow("Preview", right_id);
+        ImGui::DockBuilderFinish(dockspace_id);
+    }
+
+    draw_controls(g_state);
+    draw_preview(g_state);
+
+    // Render
+    ImGui::Render();
+    SDL_SetRenderDrawColor(g_renderer, 25, 25, 25, 255);
+    SDL_RenderClear(g_renderer);
+    ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), g_renderer);
+    SDL_RenderPresent(g_renderer);
+}
+
+int main(int argc, char* argv[]) {
+    (void)argc; (void)argv;
+
+    if (!init_app(argc, argv))
+        return 1;
+
+#ifdef __EMSCRIPTEN__
+    g_wasm_state = &g_state;
+    emscripten_set_main_loop(main_loop_body, 0, 1);
+#else
+    while (g_running) {
+        main_loop_body();
     }
 
     // Cleanup
-    if (state.tex_in)  SDL_DestroyTexture(state.tex_in);
-    if (state.tex_out) SDL_DestroyTexture(state.tex_out);
+    if (g_state.tex_in)  SDL_DestroyTexture(g_state.tex_in);
+    if (g_state.tex_out) SDL_DestroyTexture(g_state.tex_out);
 
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
+    SDL_DestroyRenderer(g_renderer);
+    SDL_DestroyWindow(g_window);
     SDL_Quit();
+#endif
     return 0;
 }
