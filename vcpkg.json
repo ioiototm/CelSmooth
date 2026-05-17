@@ -1,0 +1,15 @@
+{
+  "name": "celsmooth",
+  "version": "0.2.0",
+  "dependencies": [
+    {
+      "name": "sdl3",
+      "platform": "!emscripten"
+    },
+    {
+      "name": "imgui",
+      "features": ["sdl3-binding", "sdl3-renderer-binding", "docking-experimental"],
+      "platform": "!emscripten"
+    }
+  ]
+}
