@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+
+  # ── Windows ────────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: build_gui/vcpkg_installed
+          key: vcpkg-windows-static-${{ hashFiles('vcpkg.json') }}
+
+      - name: Build CLI
+        run: |
+          cmake -B build
+          cmake --build build --config Release
+
+      - name: Build GUI (static)
+        run: |
+          cmake -B build_gui `
+            -DBUILD_GUI=ON `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build_gui --config Release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory release
+          Copy-Item build\Release\celsmooth.exe          release\
+          Copy-Item build_gui\gui\Release\celsmooth_gui.exe release\
+          Compress-Archive -Path release\* -DestinationPath celsmooth-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: celsmooth-windows-x64.zip
+
+  # ── Linux ──────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDL3 system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxi-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev \
+            libegl1-mesa-dev libgl1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: build_gui/vcpkg_installed
+          key: vcpkg-linux-${{ hashFiles('vcpkg.json') }}
+
+      - name: Build CLI
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+
+      - name: Build GUI
+        run: |
+          cmake -B build_gui \
+            -DBUILD_GUI=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build_gui --config Release
+
+      - name: Package
+        run: |
+          mkdir release
+          cp build/celsmooth             release/
+          cp build_gui/gui/celsmooth_gui release/
+          tar -czf celsmooth-linux-x64.tar.gz -C release .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: celsmooth-linux-x64.tar.gz
+
+  # ── GitHub Release ─────────────────────────────────────────────────────────
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            celsmooth-windows-x64.zip \
+            celsmooth-linux-x64.tar.gz \
+            --title "CelSmooth ${{ github.ref_name }}" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
