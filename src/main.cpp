@@ -4,6 +4,7 @@
 #include "stb_image_write.h"
 
 #include "celsmooth/mlaa.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
