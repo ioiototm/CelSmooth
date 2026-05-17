@@ -64,7 +64,7 @@ jobs:
             libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
             libdrm-dev libgbm-dev \
             libasound2-dev libpulse-dev libudev-dev \
-            libdbus-1-dev libibus-1.0-dev
+            libdbus-1-dev
 
       - name: Cache vcpkg packages
         uses: actions/cache@v4
