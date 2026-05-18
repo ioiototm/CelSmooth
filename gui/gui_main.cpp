@@ -22,6 +22,87 @@
 #include <emscripten/html5.h>
 #endif
 
+// --- PNG color profile preservation ---
+
+struct PngColorProfile {
+    std::vector<uint8_t> chunks;  // raw color-related PNG chunks
+};
+
+static PngColorProfile extract_png_color_profile(const char* path) {
+    PngColorProfile profile;
+    FILE* f = fopen(path, "rb");
+    if (!f) return profile;
+
+    uint8_t sig[8];
+    if (fread(sig, 1, 8, f) != 8) { fclose(f); return profile; }
+    const uint8_t png_sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    if (memcmp(sig, png_sig, 8) != 0) { fclose(f); return profile; }
+
+    while (!feof(f)) {
+        uint8_t hdr[8];
+        if (fread(hdr, 1, 8, f) != 8) break;
+        uint32_t length = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16)
+                        | ((uint32_t)hdr[2] << 8)  |  (uint32_t)hdr[3];
+        char type[5] = { (char)hdr[4], (char)hdr[5], (char)hdr[6], (char)hdr[7], 0 };
+
+        std::vector<uint8_t> body(length + 4);
+        if (fread(body.data(), 1, length + 4, f) != length + 4) break;
+
+        if (strcmp(type, "iCCP") == 0 || strcmp(type, "sRGB") == 0 ||
+            strcmp(type, "gAMA") == 0 || strcmp(type, "cHRM") == 0) {
+            profile.chunks.insert(profile.chunks.end(), hdr, hdr + 8);
+            profile.chunks.insert(profile.chunks.end(), body.begin(), body.end());
+        }
+
+        if (strcmp(type, "IDAT") == 0) break;
+    }
+    fclose(f);
+    return profile;
+}
+
+static std::vector<uint8_t> make_srgb_chunk() {
+    uint8_t td[5] = { 's', 'R', 'G', 'B', 0x00 };
+    uint32_t crc = 0xFFFFFFFF;
+    for (int i = 0; i < 5; i++) {
+        crc ^= td[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (-(crc & 1)));
+    }
+    crc ^= 0xFFFFFFFF;
+    return { 0,0,0,1, 's','R','G','B', 0x00,
+             (uint8_t)(crc>>24), (uint8_t)(crc>>16),
+             (uint8_t)(crc>>8),  (uint8_t)(crc) };
+}
+
+static void inject_color_profile(std::vector<uint8_t>& png, const PngColorProfile& profile) {
+    if (png.size() < 33) return;
+    if (!profile.chunks.empty()) {
+        png.insert(png.begin() + 33, profile.chunks.begin(), profile.chunks.end());
+    } else {
+        auto srgb = make_srgb_chunk();
+        png.insert(png.begin() + 33, srgb.begin(), srgb.end());
+    }
+}
+
+static bool save_png_with_profile(const char* path, int w, int h, int comp,
+                                  const void* data, int stride,
+                                  const PngColorProfile& profile) {
+    std::vector<uint8_t> png;
+    int ok = stbi_write_png_to_func([](void* ctx, void* d, int sz) {
+        auto* v = static_cast<std::vector<uint8_t>*>(ctx);
+        v->insert(v->end(), static_cast<uint8_t*>(d), static_cast<uint8_t*>(d) + sz);
+    }, &png, w, h, comp, data, stride);
+    if (!ok) return false;
+
+    inject_color_profile(png, profile);
+
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    size_t written = fwrite(png.data(), 1, png.size(), f);
+    fclose(f);
+    return written == png.size();
+}
+
 // --- Application state ---
 
 struct AppState {
@@ -56,6 +137,9 @@ struct AppState {
     // Save
     std::string last_save_path;
     double save_flash_timer = 0.0;  // countdown for "Saved!" message
+
+    // Color profile (copied from input PNG)
+    PngColorProfile color_profile;
 
     // Layout
     bool first_frame = true;
@@ -97,6 +181,7 @@ static bool load_image(AppState& state, const char* path) {
     state.img_w = w;
     state.img_h = h;
     state.img_path = path;
+    state.color_profile = extract_png_color_profile(path);
     state.pixels_in.assign(data, data + (size_t)w * h * 4);
     state.pixels_out.resize((size_t)w * h * 4);
     stbi_image_free(data);
@@ -182,6 +267,9 @@ static void wasm_download_image(AppState& state) {
             base += "_celsmooth.png";
         filename = base;
     }
+
+    // Preserve the original image's color profile
+    inject_color_profile(buf.data, state.color_profile);
 
     // Trigger browser download
     EM_ASM({
@@ -339,8 +427,9 @@ static void draw_controls(AppState& state) {
 #else
         if (ImGui::Button("Save Result")) {
             std::string out_path = make_output_path(state.img_path);
-            if (stbi_write_png(out_path.c_str(), state.img_w, state.img_h, 4,
-                               state.pixels_out.data(), state.img_w * 4)) {
+            if (save_png_with_profile(out_path.c_str(), state.img_w, state.img_h, 4,
+                                      state.pixels_out.data(), state.img_w * 4,
+                                      state.color_profile)) {
                 state.last_save_path = out_path;
                 state.save_flash_timer = 3.0;
             }

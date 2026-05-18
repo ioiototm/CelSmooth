@@ -12,6 +12,100 @@
 #include <string>
 #include <vector>
 
+// --- PNG color profile preservation ---
+//
+// stb_image strips ICC profiles when loading. Without them, viewers may
+// display colors differently (especially on HDR / wide-gamut monitors).
+// We extract the color-related chunks from the original PNG and inject
+// them into every output PNG to preserve the intended appearance.
+
+struct PngColorProfile {
+    std::vector<uint8_t> chunks;  // raw PNG chunks (iCCP, sRGB, gAMA, cHRM)
+};
+
+static PngColorProfile extract_png_color_profile(const char* path) {
+    PngColorProfile profile;
+    FILE* f = fopen(path, "rb");
+    if (!f) return profile;
+
+    // Verify PNG signature
+    uint8_t sig[8];
+    if (fread(sig, 1, 8, f) != 8) { fclose(f); return profile; }
+    const uint8_t png_sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    if (memcmp(sig, png_sig, 8) != 0) { fclose(f); return profile; }
+
+    // Scan chunks until IDAT (all metadata comes before image data)
+    while (!feof(f)) {
+        uint8_t hdr[8];
+        if (fread(hdr, 1, 8, f) != 8) break;
+        uint32_t length = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16)
+                        | ((uint32_t)hdr[2] << 8)  |  (uint32_t)hdr[3];
+        char type[5] = { (char)hdr[4], (char)hdr[5], (char)hdr[6], (char)hdr[7], 0 };
+
+        // Read chunk data + CRC (4 bytes)
+        std::vector<uint8_t> body(length + 4);
+        if (fread(body.data(), 1, length + 4, f) != length + 4) break;
+
+        // Keep color-related chunks
+        if (strcmp(type, "iCCP") == 0 || strcmp(type, "sRGB") == 0 ||
+            strcmp(type, "gAMA") == 0 || strcmp(type, "cHRM") == 0) {
+            profile.chunks.insert(profile.chunks.end(), hdr, hdr + 8);
+            profile.chunks.insert(profile.chunks.end(), body.begin(), body.end());
+        }
+
+        // Stop at IDAT — no color chunks appear after this
+        if (strcmp(type, "IDAT") == 0) break;
+    }
+    fclose(f);
+    return profile;
+}
+
+// sRGB fallback chunk for when the source has no color profile
+static std::vector<uint8_t> make_srgb_chunk() {
+    uint8_t td[5] = { 's', 'R', 'G', 'B', 0x00 };
+    uint32_t crc = 0xFFFFFFFF;
+    for (int i = 0; i < 5; i++) {
+        crc ^= td[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (-(crc & 1)));
+    }
+    crc ^= 0xFFFFFFFF;
+    return { 0,0,0,1, 's','R','G','B', 0x00,
+             (uint8_t)(crc>>24), (uint8_t)(crc>>16),
+             (uint8_t)(crc>>8),  (uint8_t)(crc) };
+}
+
+static bool save_png_with_profile(const char* path, int w, int h, int comp,
+                                  const void* data, int stride,
+                                  const PngColorProfile& profile) {
+    std::vector<uint8_t> png;
+    int ok = stbi_write_png_to_func([](void* ctx, void* d, int sz) {
+        auto* v = static_cast<std::vector<uint8_t>*>(ctx);
+        v->insert(v->end(), static_cast<uint8_t*>(d), static_cast<uint8_t*>(d) + sz);
+    }, &png, w, h, comp, data, stride);
+    if (!ok || png.size() < 33) return false;
+
+    // Insert color profile after IHDR (offset 33)
+    if (!profile.chunks.empty()) {
+        png.insert(png.begin() + 33, profile.chunks.begin(), profile.chunks.end());
+    } else {
+        auto srgb = make_srgb_chunk();
+        png.insert(png.begin() + 33, srgb.begin(), srgb.end());
+    }
+
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    size_t written = fwrite(png.data(), 1, png.size(), f);
+    fclose(f);
+    return written == png.size();
+}
+
+// Convenience wrapper for debug images (no source profile, just tag as sRGB)
+static bool save_png_srgb(const char* path, int w, int h, int comp, const void* data, int stride) {
+    PngColorProfile empty;
+    return save_png_with_profile(path, w, h, comp, data, stride, empty);
+}
+
 static void print_usage(const char* prog) {
     fprintf(stderr,
         "CelSmooth v0.2.0 — Morphological Anti-Aliasing for cel art\n"
@@ -57,7 +151,7 @@ static void save_edge_debug(const celsmooth::EdgeMap& edges, const char* path) {
             px[3] = 255;
         }
     }
-    stbi_write_png(path, w, h, 4, img.data(), w * 4);
+    save_png_srgb(path, w, h, 4, img.data(), w * 4);
     fprintf(stderr, "Edge map saved to: %s\n", path);
 }
 
@@ -121,7 +215,7 @@ static void save_segment_debug(
         }
     }
 
-    stbi_write_png(path, w, h, 4, img.data(), w * 4);
+    save_png_srgb(path, w, h, 4, img.data(), w * 4);
     fprintf(stderr, "Segment map saved to: %s\n", path);
 }
 
@@ -154,7 +248,7 @@ static void save_weights_debug(
         }
     }
 
-    stbi_write_png(path, w, h, 4, img.data(), w * 4);
+    save_png_srgb(path, w, h, 4, img.data(), w * 4);
     fprintf(stderr, "Weight heatmap saved to: %s\n", path);
 }
 
@@ -200,7 +294,7 @@ static void save_diff_debug(
         }
     }
 
-    stbi_write_png(path, w, h, 4, img.data(), w * 4);
+    save_png_srgb(path, w, h, 4, img.data(), w * 4);
     fprintf(stderr, "Diff map saved to: %s\n", path);
 }
 
@@ -219,7 +313,7 @@ static void save_diagonal_debug(const celsmooth::DiagonalMap& diag, const char* 
             px[3] = 255;
         }
     }
-    stbi_write_png(path, w, h, 4, img.data(), w * 4);
+    save_png_srgb(path, w, h, 4, img.data(), w * 4);
     fprintf(stderr, "Diagonal edge map saved to: %s\n", path);
 }
 
@@ -312,6 +406,9 @@ int main(int argc, char* argv[]) {
     int stride = w * 4;
     fprintf(stderr, "Loaded: %s (%dx%d, %d channels)\n", input_path, w, h, channels);
 
+    // Extract color profile from the original to preserve it in the output
+    PngColorProfile color_profile = extract_png_color_profile(input_path);
+
     bool any_debug = debug_edges_path || debug_segments_path || debug_weights_path || debug_diff_path || debug_diag_path;
 
     std::vector<uint8_t> output(static_cast<size_t>(stride) * h);
@@ -375,7 +472,7 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Processed in %.1f ms\n", ms);
 
     // Save
-    if (!stbi_write_png(output_path, w, h, 4, output.data(), stride)) {
+    if (!save_png_with_profile(output_path, w, h, 4, output.data(), stride, color_profile)) {
         fprintf(stderr, "Error: failed to write '%s'\n", output_path);
         stbi_image_free(pixels);
         return 1;
