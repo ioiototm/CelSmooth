@@ -1,6 +1,15 @@
 # CelSmooth
 
+[![CI](https://github.com/ioiototm/CelSmooth/actions/workflows/ci.yml/badge.svg)](https://github.com/ioiototm/CelSmooth/actions/workflows/ci.yml)
+[![Release](https://github.com/ioiototm/CelSmooth/actions/workflows/release.yml/badge.svg)](https://github.com/ioiototm/CelSmooth/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/ioiototm/CelSmooth)](https://github.com/ioiototm/CelSmooth/releases/latest)
+[![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](UNLICENSE)
+
 A free, standalone Morphological Anti-Aliasing (MLAA) tool for cel art and anime-style images. Replicates the OLM Smoother workflow used in Japanese animation production, without requiring Adobe Creative Cloud.
+
+### [Try it in your browser](https://ioiototm.github.io/CelSmooth/) - no install, fully offline, nothing is uploaded
+
+### [Download for Windows/Linux](https://github.com/ioiototm/CelSmooth/releases/latest) - prebuilt binaries, no build required
 
 ## What it does
 
@@ -25,7 +34,9 @@ CelSmooth implements two generations of the algorithm:
 - **U-shape rounding** - rounder corners where edges meet on the same side
 - **Real-time GUI** - drag-and-drop image, live sliders, instant preview with split wipe or toggle comparison
 - **One-click save** - save the processed result next to the original with a single button
+- **Browser version** - runs entirely in your browser via WebAssembly, nothing is uploaded, all processing stays on your machine
 - **OpenMP support** - optional multi-threaded build (~1.7x faster on a 1440x1080 image)
+- **Color profile preservation** - copies ICC/sRGB profiles from input to output so colors match across monitors
 - **Zero-dependency library** - pure C++17 STL, easy to embed in other tools
 
 ## Screenshots
@@ -113,6 +124,9 @@ celsmooth/
   gui/
     CMakeLists.txt
     gui_main.cpp            # Dear ImGui + SDL3 real-time GUI
+  wasm/
+    CMakeLists.txt          # Standalone Emscripten build
+    shell.html              # Custom HTML shell for browser version
   vendor/
     stb_image.h
     stb_image_write.h
@@ -133,12 +147,12 @@ celsmooth::mlaa_process(pixels_rgba, output_rgba, width, height, width * 4, para
 
 ## Roadmap
 
+- ~~**Prebuilt binaries** - GitHub releases with ready-to-run Windows/Linux executables~~
+- ~~**WebAssembly build** - run in the browser with zero install~~
 - **Batch processing** - process entire folders of animation frames in one pass
 - **SIMD/AVX intrinsics** - vectorized edge detection and blending for further CPU speedup
 - **GPU acceleration** - GLSL/HLSL compute shader port for real-time use in game engines and compositing software
-- **WebAssembly build** - run in the browser with zero install (the zero-dep library design already supports this)
 - **Bilateral polish pass** - optional second pass to smooth residual noise without blurring edges
-- **Prebuilt binaries** - GitHub releases with ready-to-run Windows/Linux/macOS executables
 
 ## Acknowledgements
 
