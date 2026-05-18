@@ -7,7 +7,6 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <imgui.h>
-#include <imgui_internal.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlrenderer3.h>
 
@@ -16,6 +15,9 @@
 #include <chrono>
 #include <cstdio>
 #include <algorithm>
+#include <cstring>
+
+#include "fonts/inter_medium.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -141,8 +143,8 @@ struct AppState {
     // Color profile (copied from input PNG)
     PngColorProfile color_profile;
 
-    // Layout
-    bool first_frame = true;
+    // Sidebar width
+    float sidebar_w = 310.0f;
 };
 
 static std::string make_output_path(const std::string& input_path) {
@@ -287,145 +289,243 @@ static void wasm_download_image(AppState& state) {
 }
 #endif
 
+// Helper: full-bleed section header — custom drawn, no CollapsingHeader
+static bool SectionHeader(const char* label) {
+    ImGuiID id = ImGui::GetID(label);
+    ImGuiStorage* storage = ImGui::GetStateStorage();
+
+    // Default to open
+    bool open = storage->GetBool(id, true);
+
+    ImVec2 cursor = ImGui::GetCursorScreenPos();
+    ImVec2 win_pos = ImGui::GetWindowPos();
+    float win_w = ImGui::GetWindowSize().x;
+    float h = ImGui::GetFrameHeight();
+    float pad_x = ImGui::GetStyle().WindowPadding.x;
+
+    ImVec2 p0(win_pos.x, cursor.y);
+    ImVec2 p1(win_pos.x + win_w, cursor.y + h);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Hit test
+    bool hovered = ImGui::IsMouseHoveringRect(p0, p1);
+    bool clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+
+    if (clicked) {
+        open = !open;
+        storage->SetBool(id, open);
+    }
+
+    // Background
+    ImU32 bg_col = hovered ? IM_COL32(50, 50, 56, 255) : IM_COL32(38, 38, 43, 255);
+    dl->AddRectFilled(p0, p1, bg_col);
+
+    // Triangle arrow
+    float arrow_size = 8.0f;
+    float arrow_x = cursor.x;
+    float arrow_cy = cursor.y + h * 0.5f;
+    if (open) {
+        // Down arrow
+        dl->AddTriangleFilled(
+            ImVec2(arrow_x, arrow_cy - arrow_size * 0.35f),
+            ImVec2(arrow_x + arrow_size, arrow_cy - arrow_size * 0.35f),
+            ImVec2(arrow_x + arrow_size * 0.5f, arrow_cy + arrow_size * 0.35f),
+            IM_COL32(140, 140, 150, 255));
+    } else {
+        // Right arrow
+        dl->AddTriangleFilled(
+            ImVec2(arrow_x, arrow_cy - arrow_size * 0.5f),
+            ImVec2(arrow_x + arrow_size * 0.7f, arrow_cy),
+            ImVec2(arrow_x, arrow_cy + arrow_size * 0.5f),
+            IM_COL32(140, 140, 150, 255));
+    }
+
+    // Label
+    float text_x = arrow_x + arrow_size + 8.0f;
+    float text_y = cursor.y + (h - ImGui::GetTextLineHeight()) * 0.5f;
+    dl->AddText(ImVec2(text_x, text_y), IM_COL32(220, 220, 225, 255), label);
+
+    // Advance cursor past the header
+    ImGui::SetCursorScreenPos(ImVec2(cursor.x, cursor.y + h + ImGui::GetStyle().ItemSpacing.y));
+
+    return open;
+}
+
+// Helper: label above a slider, full width
+static bool LabeledSliderFloat(const char* label, const char* tooltip, float* v, float v_min, float v_max, const char* fmt = "%.2f") {
+    ImGui::TextDisabled("%s", label);
+    ImGui::SetNextItemWidth(-1);
+    // Use ## to hide the label from the slider itself (we already drew it above)
+    char id[128];
+    snprintf(id, sizeof(id), "##%s", label);
+    bool changed = ImGui::SliderFloat(id, v, v_min, v_max, fmt);
+    if (ImGui::IsItemHovered() && tooltip)
+        ImGui::SetTooltip("%s", tooltip);
+    return changed;
+}
+
+static bool LabeledSliderInt(const char* label, const char* tooltip, int* v, int v_min, int v_max) {
+    ImGui::TextDisabled("%s", label);
+    ImGui::SetNextItemWidth(-1);
+    char id[128];
+    snprintf(id, sizeof(id), "##%s", label);
+    bool changed = ImGui::SliderInt(id, v, v_min, v_max);
+    if (ImGui::IsItemHovered() && tooltip)
+        ImGui::SetTooltip("%s", tooltip);
+    return changed;
+}
+
 static void draw_controls(AppState& state) {
-    ImGui::Begin("Parameters", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    // Drawn inside a child region — no Begin/End needed
+    // Push item width to leave a right margin so nothing hugs the splitter
+    ImGui::PushItemWidth(-8);
 
 #ifdef __EMSCRIPTEN__
-    if (ImGui::Button("Open Image...")) {
+    if (ImGui::Button("Open Image...", ImVec2(-1, 0))) {
         open_file_dialog();
     }
-    ImGui::Separator();
     ImGui::Spacing();
 #endif
 
+    // --- Image info ---
     if (state.img_w > 0) {
-        ImGui::Text("Image: %s", state.img_path.c_str());
-        ImGui::Text("Size: %d x %d", state.img_w, state.img_h);
-        ImGui::Text("Process time: %.1f ms", state.last_process_ms);
-        ImGui::Separator();
+        // Filename only (not full path)
+        std::string fname = state.img_path;
+        size_t slash = fname.find_last_of("/\\");
+        if (slash != std::string::npos) fname = fname.substr(slash + 1);
+
+        ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "%s", fname.c_str());
+        ImGui::TextDisabled("%d x %d  |  %.1f ms", state.img_w, state.img_h, state.last_process_ms);
+        ImGui::Spacing();
     }
 
-    ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f), "Core Parameters");
-    ImGui::Spacing();
+    // --- Core Parameters ---
+    if (SectionHeader("Core")) {
+        ImGui::Spacing();
 
-    if (ImGui::SliderFloat("Threshold", &state.params.threshold, 0.01f, 0.5f, "%.3f")) {
-        state.params_dirty = true;
+        if (LabeledSliderFloat("Threshold", "Edge detection sensitivity.\nLower = more edges detected.\nHigher = fewer edges.",
+                &state.params.threshold, 0.01f, 0.5f, "%.3f"))
+            state.params_dirty = true;
+
+        ImGui::Spacing();
+
+        int search_dist = state.params.max_distance;
+        if (LabeledSliderInt("Search Distance", "Maximum edge segment length.\nLonger = handles longer straight edges.\nShorter = faster.",
+                &search_dist, 2, 128)) {
+            state.params.max_distance = search_dist;
+            state.params_dirty = true;
+        }
+
+        ImGui::Spacing();
+
+        if (LabeledSliderFloat("Strength", "Blend intensity.\n1.0 = full anti-aliasing.\n0.5 = subtle.\n>1.0 = exaggerated.",
+                &state.params.strength, 0.0f, 1.5f))
+            state.params_dirty = true;
+
+        ImGui::Spacing();
     }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Edge detection sensitivity.\nLower = more edges detected (smoother but may blur detail).\nHigher = fewer edges (preserves detail but less smoothing).");
 
-    int search_dist = state.params.max_distance;
-    if (ImGui::SliderInt("Search Distance", &search_dist, 2, 128)) {
-        state.params.max_distance = search_dist;
-        state.params_dirty = true;
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Maximum edge segment length to process.\nLonger = handles longer straight edges.\nShorter = faster, avoids artifacts on complex shapes.");
+    // --- V2 Features ---
+    if (SectionHeader("V2 Features")) {
+        ImGui::Spacing();
 
-    if (ImGui::SliderFloat("Strength", &state.params.strength, 0.0f, 1.5f, "%.2f")) {
-        state.params_dirty = true;
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Blend intensity.\n1.0 = full anti-aliasing.\n0.5 = subtle smoothing.\n>1.0 = exaggerated (artistic effect).");
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f), "V2 Features");
-    ImGui::Spacing();
-
-    bool classic = state.params.classic_mode;
-    if (ImGui::Checkbox("Classic Mode (V1 only)", &classic)) {
-        state.params.classic_mode = classic;
-        state.params_dirty = true;
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Disable all V2 features.\nUses the original 2009 MLAA algorithm only.");
-
-    if (!state.params.classic_mode) {
-        ImGui::Indent();
-
-        if (ImGui::Checkbox("T/Cross Shapes", &state.params.enable_t_cross)) {
+        bool classic = state.params.classic_mode;
+        if (ImGui::Checkbox("Classic Mode (V1 only)", &classic)) {
+            state.params.classic_mode = classic;
             state.params_dirty = true;
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Handle T-junctions and cross-shaped intersections.\nImproves smoothing where lines meet at right angles.");
+            ImGui::SetTooltip("Disable all V2 features.\nUses the original 2009 MLAA algorithm only.");
 
-        if (ImGui::Checkbox("Diagonal Detection", &state.params.enable_diagonals)) {
-            state.params_dirty = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Detect and smooth 45-degree staircase patterns.\nGreat for diagonal lines in pixel art.");
+        if (!state.params.classic_mode) {
+            ImGui::Spacing();
 
-        if (ImGui::Checkbox("Gamma Correction", &state.params.enable_gamma)) {
-            state.params_dirty = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Blend in linear light space (physically correct).\nProduces perceptually even gradients between colors.");
-
-        if (state.params.enable_gamma) {
-            if (ImGui::SliderFloat("Extended Gamma", &state.params.extended_gamma, 0.5f, 3.0f, "%.1f")) {
+            if (ImGui::Checkbox("T/Cross Shapes", &state.params.enable_t_cross))
                 state.params_dirty = true;
-            }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Boost thin dark strokes.\n1.0 = standard.\n>1.0 = preserves thin lines better (useful for ink outlines).");
+                ImGui::SetTooltip("Handle T-junctions and cross-shaped intersections.");
+
+            if (ImGui::Checkbox("Diagonal Detection", &state.params.enable_diagonals))
+                state.params_dirty = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Smooth 45-degree staircase patterns.");
+
+            if (ImGui::Checkbox("Gamma Correction", &state.params.enable_gamma))
+                state.params_dirty = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Blend in linear light space (physically correct).");
+
+            if (state.params.enable_gamma) {
+                ImGui::Spacing();
+                if (LabeledSliderFloat("Extended Gamma", "Boost thin dark strokes.\n1.0 = standard.\n>1.0 = preserves thin lines.",
+                        &state.params.extended_gamma, 0.5f, 3.0f, "%.1f"))
+                    state.params_dirty = true;
+            }
+
+            ImGui::Spacing();
+
+            if (LabeledSliderFloat("Smoothness", "Blend falloff shape.\n1.0 = standard.\n<1.0 = sharper.\n>1.0 = smoother.",
+                    &state.params.smoothness, 0.0f, 2.0f))
+                state.params_dirty = true;
+
+            ImGui::Spacing();
+
+            if (ImGui::Checkbox("U-Rounding", &state.params.u_rounding))
+                state.params_dirty = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Rounder corners where two edges meet on the same side.");
         }
 
-        if (ImGui::SliderFloat("Smoothness", &state.params.smoothness, 0.0f, 2.0f, "%.2f")) {
-            state.params_dirty = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Controls blend falloff shape.\n1.0 = standard.\n<1.0 = steeper falloff (sharper).\n>1.0 = gentler falloff (smoother).");
-
-        if (ImGui::Checkbox("U-Rounding", &state.params.u_rounding)) {
-            state.params_dirty = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Apply w'=2w^2 rounding to U-shaped patterns.\nProduces rounder corners where two edges meet on the same side.");
-
-        ImGui::Unindent();
+        ImGui::Spacing();
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f), "View");
-    ImGui::Spacing();
+    // --- View ---
+    if (SectionHeader("View")) {
+        ImGui::Spacing();
 
-    ImGui::SliderFloat("Zoom", &state.zoom, 0.25f, 8.0f, "%.2fx");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Scroll wheel also zooms in the preview area.");
+        if (LabeledSliderFloat("Zoom", "Scroll wheel also zooms in the preview.", &state.zoom, 0.25f, 8.0f, "%.2fx")) {}
 
-    const char* compare_labels[] = { "Toggle (Space)", "Split Wipe" };
-    ImGui::Combo("Compare", &state.compare_mode, compare_labels, 2);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Toggle: hold Space to flash the original.\nSplit Wipe: drag a divider line to compare side by side.");
+        ImGui::Spacing();
 
-    if (state.compare_mode == 0) {
-        ImGui::TextDisabled("Hold SPACE to see original");
-    } else {
-        ImGui::TextDisabled("Drag the divider line in the preview");
+        ImGui::TextDisabled("Compare Mode");
+        ImGui::SetNextItemWidth(-1);
+        const char* compare_labels[] = { "Toggle (Space)", "Split Wipe" };
+        ImGui::Combo("##Compare", &state.compare_mode, compare_labels, 2);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Toggle: hold Space to flash the original.\nSplit Wipe: drag a divider to compare side by side.");
+
+        if (state.compare_mode == 0) {
+            ImGui::TextDisabled("Hold SPACE to see original");
+        } else {
+            ImGui::TextDisabled("Drag the divider in the preview");
+        }
+
+        ImGui::Spacing();
     }
 
+    // --- Actions ---
     ImGui::Spacing();
-    if (ImGui::Button("Reset Parameters")) {
+    if (ImGui::Button("Reset Parameters", ImVec2(-1, 0))) {
         state.params = celsmooth::MlaaParams{};
         state.params_dirty = true;
     }
 
-    // --- Save ---
     if (state.img_w > 0) {
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f), "Output");
         ImGui::Spacing();
 
 #ifdef __EMSCRIPTEN__
-        if (ImGui::Button("Download Result")) {
+        if (ImGui::Button("Download Result", ImVec2(-1, 0))) {
             wasm_download_image(state);
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Download the processed image as PNG");
 #else
-        if (ImGui::Button("Save Result")) {
+        // Accent-colored save button
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.22f, 0.42f, 0.44f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.28f, 0.55f, 0.57f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.32f, 0.65f, 0.67f, 1.0f));
+        if (ImGui::Button("Save Result", ImVec2(-1, 0))) {
             std::string out_path = make_output_path(state.img_path);
             if (save_png_with_profile(out_path.c_str(), state.img_w, state.img_h, 4,
                                       state.pixels_out.data(), state.img_w * 4,
@@ -434,38 +534,69 @@ static void draw_controls(AppState& state) {
                 state.save_flash_timer = 3.0;
             }
         }
+        ImGui::PopStyleColor(3);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Save the processed image next to the original\nas <filename>_celsmooth.png");
+            ImGui::SetTooltip("Save as <filename>_celsmooth.png\nnext to the original");
 
         if (state.save_flash_timer > 0.0) {
             state.save_flash_timer -= ImGui::GetIO().DeltaTime;
-            ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.5f, 1.0f), "Saved!");
             ImGui::TextWrapped("%s", state.last_save_path.c_str());
         }
 #endif
     }
 
-    ImGui::End();
+    ImGui::PopItemWidth();
 }
 
 static void draw_preview(AppState& state) {
-    ImGui::Begin("Preview", nullptr,
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    // Drawn inside a child region — no Begin/End needed
 
     if (state.img_w == 0) {
         ImVec2 avail = ImGui::GetContentRegionAvail();
+        ImVec2 cursor = ImGui::GetCursorScreenPos();
+
+        // Dashed border rectangle
+        float margin = 40.0f;
+        if (avail.x > margin * 3 && avail.y > margin * 3) {
+            ImVec2 r0(cursor.x + margin, cursor.y + margin);
+            ImVec2 r1(cursor.x + avail.x - margin, cursor.y + avail.y - margin);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Draw dashed border (series of short lines)
+            ImU32 dash_col = IM_COL32(80, 80, 80, 160);
+            float dash_len = 10.0f, gap_len = 8.0f;
+            auto draw_dashed_line = [&](ImVec2 a, ImVec2 b) {
+                float dx = b.x - a.x, dy = b.y - a.y;
+                float len = sqrtf(dx * dx + dy * dy);
+                if (len < 1.0f) return;
+                dx /= len; dy /= len;
+                float t = 0;
+                while (t < len) {
+                    float end = std::min(t + dash_len, len);
+                    dl->AddLine(ImVec2(a.x + dx * t, a.y + dy * t),
+                                ImVec2(a.x + dx * end, a.y + dy * end), dash_col, 1.5f);
+                    t = end + gap_len;
+                }
+            };
+            draw_dashed_line(r0, ImVec2(r1.x, r0.y));
+            draw_dashed_line(ImVec2(r1.x, r0.y), r1);
+            draw_dashed_line(r1, ImVec2(r0.x, r1.y));
+            draw_dashed_line(ImVec2(r0.x, r1.y), r0);
+        }
+
+        // Centered hint text
 #ifdef __EMSCRIPTEN__
         const char* hint = "Open or drop an image to begin";
 #else
-        const char* hint = "Drop an image here";
+        const char* hint = "Drop an image here to begin";
 #endif
         ImVec2 text_size = ImGui::CalcTextSize(hint);
         ImGui::SetCursorPos(ImVec2(
             (avail.x - text_size.x) * 0.5f,
             (avail.y - text_size.y) * 0.5f));
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", hint);
-        ImGui::End();
+        ImGui::TextColored(ImVec4(0.40f, 0.40f, 0.42f, 1.0f), "%s", hint);
+
         return;
     }
 
@@ -484,7 +615,7 @@ static void draw_preview(AppState& state) {
         }
     }
 
-    if (!state.tex_in || !state.tex_out) { ImGui::End(); return; }
+    if (!state.tex_in || !state.tex_out) return;
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     float disp_w = state.img_w * state.zoom;
@@ -583,8 +714,6 @@ static void draw_preview(AppState& state) {
         dl->AddText(ImVec2(lbl_proc.x + 1, lbl_proc.y + 1), IM_COL32(0, 0, 0, 180), "PROCESSED");
         dl->AddText(lbl_proc, IM_COL32(100, 255, 200, 255), "PROCESSED");
     }
-
-    ImGui::End();
 }
 
 // --- Common init (shared between desktop and WASM) ---
@@ -601,7 +730,7 @@ static bool init_app(int argc, char* argv[]) {
     }
 
     g_window = SDL_CreateWindow(
-        "CelSmooth v0.2.0",
+        "CelSmooth v0.3.1",
         1280, 800,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!g_window) {
@@ -620,33 +749,88 @@ static bool init_app(int argc, char* argv[]) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.IniFilename = nullptr;  // no layout file needed — we use a fixed layout
 
-#ifdef __EMSCRIPTEN__
-    io.IniFilename = nullptr;  // no filesystem for imgui.ini in browser
-#endif
+    // --- Load Inter font ---
+    {
+        ImFontConfig font_cfg;
+        font_cfg.FontDataOwnedByAtlas = false;  // we own the static array
+        font_cfg.OversampleH = 2;
+        font_cfg.OversampleV = 1;
+        font_cfg.PixelSnapH = true;
+        io.Fonts->AddFontFromMemoryTTF(
+            (void*)inter_medium_data, inter_medium_size, 15.0f, &font_cfg);
+    }
 
+    // --- Theme ---
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 4.0f;
-    style.FrameRounding = 3.0f;
-    style.GrabRounding = 3.0f;
+
+    // Shape
+    style.WindowRounding    = 6.0f;
+    style.ChildRounding     = 4.0f;
+    style.FrameRounding     = 4.0f;
+    style.PopupRounding     = 4.0f;
+    style.ScrollbarRounding = 4.0f;
+    style.GrabRounding      = 3.0f;
+    style.TabRounding       = 4.0f;
+
+    // Spacing
+    style.WindowPadding     = ImVec2(14, 14);
+    style.FramePadding      = ImVec2(10, 6);
+    style.ItemSpacing       = ImVec2(8, 6);
+    style.ItemInnerSpacing  = ImVec2(6, 4);
+    style.IndentSpacing     = 18.0f;
+    style.ScrollbarSize     = 12.0f;
+    style.GrabMinSize       = 10.0f;
+
+    // Borders
+    style.WindowBorderSize  = 1.0f;
+    style.ChildBorderSize   = 0.0f;
+    style.FrameBorderSize   = 0.0f;
+    style.PopupBorderSize   = 1.0f;
+    style.TabBorderSize     = 0.0f;
+
+    // Colors — soft dark theme with teal accent
+    ImVec4* c = style.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.10f, 0.10f, 0.11f, 1.00f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.11f, 0.11f, 0.13f, 0.96f);
+    c[ImGuiCol_Border]               = ImVec4(0.22f, 0.22f, 0.24f, 0.60f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.16f, 0.16f, 0.18f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.20f, 0.20f, 0.23f, 1.00f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.24f, 0.24f, 0.27f, 1.00f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.11f, 0.11f, 0.13f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.08f, 0.08f, 0.09f, 0.75f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.10f, 0.10f, 0.11f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.28f, 0.28f, 0.30f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.35f, 0.35f, 0.38f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.42f, 0.42f, 0.45f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.40f, 0.78f, 0.80f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.35f, 0.68f, 0.70f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.45f, 0.82f, 0.85f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.20f, 0.20f, 0.23f, 1.00f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.28f, 0.52f, 0.54f, 1.00f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.32f, 0.62f, 0.64f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.18f, 0.18f, 0.20f, 1.00f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.26f, 0.48f, 0.50f, 0.80f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.30f, 0.58f, 0.60f, 1.00f);
+    c[ImGuiCol_Separator]            = ImVec4(0.22f, 0.22f, 0.24f, 0.60f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.35f, 0.68f, 0.70f, 0.80f);
+    c[ImGuiCol_SeparatorActive]      = ImVec4(0.40f, 0.78f, 0.80f, 1.00f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.35f, 0.68f, 0.70f, 0.25f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.35f, 0.68f, 0.70f, 0.65f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.40f, 0.78f, 0.80f, 0.90f);
+    c[ImGuiCol_TextSelectedBg]       = ImVec4(0.30f, 0.58f, 0.60f, 0.35f);
+    c[ImGuiCol_NavHighlight]         = ImVec4(0.40f, 0.78f, 0.80f, 1.00f);
 
     ImGui_ImplSDL3_InitForSDLRenderer(g_window, g_renderer);
     ImGui_ImplSDLRenderer3_Init(g_renderer);
 
     g_state.renderer = g_renderer;
-
-#ifndef __EMSCRIPTEN__
-    // Only force default layout if no imgui.ini exists yet
-    {
-        FILE* f = fopen("imgui.ini", "r");
-        if (f) {
-            fclose(f);
-            g_state.first_frame = false;
-        }
-    }
-#endif
 
     // Enable drag and drop
     SDL_SetEventEnabled(SDL_EVENT_DROP_FILE, true);
@@ -684,27 +868,56 @@ static void main_loop_body() {
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
 
-    // Dockspace over the whole window
-    ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
+    // --- Fullscreen window, no decorations ---
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->WorkPos);
+    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("##Main", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus);
+    ImGui::PopStyleVar(3);
 
-    // Set up default layout on first frame (Parameters left, Preview right)
-    if (g_state.first_frame) {
-        g_state.first_frame = false;
+    float full_h = ImGui::GetContentRegionAvail().y;
 
-        ImGui::DockBuilderRemoveNode(dockspace_id);
-        ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
-        ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
-
-        ImGuiID left_id, right_id;
-        ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.28f, &left_id, &right_id);
-
-        ImGui::DockBuilderDockWindow("Parameters", left_id);
-        ImGui::DockBuilderDockWindow("Preview", right_id);
-        ImGui::DockBuilderFinish(dockspace_id);
-    }
-
+    // --- Left sidebar (scrollable controls) ---
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 16));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.11f, 1.0f));
+    ImGui::BeginChild("##Sidebar", ImVec2(g_state.sidebar_w, full_h), ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    ImGui::Spacing();
     draw_controls(g_state);
+    ImGui::EndChild();
+
+    // --- Resize handle between sidebar and preview ---
+    ImGui::SameLine(0, 0);
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.14f, 0.14f, 0.15f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.28f, 0.52f, 0.54f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.35f, 0.68f, 0.70f, 1.0f));
+    ImGui::Button("##Splitter", ImVec2(4.0f, full_h));
+    ImGui::PopStyleColor(3);
+    if (ImGui::IsItemActive()) {
+        g_state.sidebar_w += ImGui::GetIO().MouseDelta.x;
+        g_state.sidebar_w = std::clamp(g_state.sidebar_w, 220.0f, 500.0f);
+    }
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+    // --- Right preview area ---
+    ImGui::SameLine(0, 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 16));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.07f, 0.08f, 1.0f));
+    ImGui::BeginChild("##Preview", ImVec2(0, full_h), ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
     draw_preview(g_state);
+    ImGui::EndChild();
+
+    ImGui::End();  // ##Main
 
     // Render
     ImGui::Render();
