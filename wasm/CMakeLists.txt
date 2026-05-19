@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
-project(celsmooth_wasm LANGUAGES CXX)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../version.cmake)
+project(celsmooth_wasm VERSION ${CELSMOOTH_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,30 +45,35 @@ target_link_libraries(imgui_lib PUBLIC SDL3::SDL3)
 
 # ── CelSmooth core library ─────────────────────────────────────────────────
 add_library(celsmooth_lib STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mlaa.cpp
+    ${CELSMOOTH_ROOT}/src/mlaa.cpp
 )
 target_include_directories(celsmooth_lib PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CELSMOOTH_ROOT}/include
 )
+target_compile_definitions(celsmooth_lib PUBLIC CELSMOOTH_VERSION="${PROJECT_VERSION}")
 
 # ── WASM GUI executable ────────────────────────────────────────────────────
-add_executable(celsmooth
-    ${CMAKE_CURRENT_SOURCE_DIR}/../gui/gui_main.cpp
+# Target name is celsmooth_wasm for consistency with celsmooth_lib/celsmooth_gui,
+# but OUTPUT_NAME keeps the deployed artifact as celsmooth.html so the
+# GitHub Pages link doesn't break.
+add_executable(celsmooth_wasm
+    ${CELSMOOTH_ROOT}/gui/gui_main.cpp
 )
-target_include_directories(celsmooth PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor
+target_include_directories(celsmooth_wasm PRIVATE
+    ${CELSMOOTH_ROOT}/vendor
 )
-target_link_libraries(celsmooth PRIVATE
+target_link_libraries(celsmooth_wasm PRIVATE
     celsmooth_lib
     imgui_lib
     SDL3::SDL3
 )
+set_target_properties(celsmooth_wasm PROPERTIES OUTPUT_NAME celsmooth)
 
 # ── Emscripten-specific flags ──────────────────────────────────────────────
 if(EMSCRIPTEN)
     set(SHELL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/shell.html")
 
-    target_link_options(celsmooth PRIVATE
+    target_link_options(celsmooth_wasm PRIVATE
         -sALLOW_MEMORY_GROWTH=1
         -sMAX_WEBGL_VERSION=2
         -sMIN_WEBGL_VERSION=2
@@ -77,5 +83,5 @@ if(EMSCRIPTEN)
     )
 
     # Output as .html so Emscripten produces the trio: .html + .js + .wasm
-    set_target_properties(celsmooth PROPERTIES SUFFIX ".html")
+    set_target_properties(celsmooth_wasm PROPERTIES SUFFIX ".html")
 endif()
