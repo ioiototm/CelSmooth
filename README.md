@@ -25,6 +25,13 @@ CelSmooth implements two generations of the algorithm:
 
 **V2** adds the extensions described in the [OLM Digital SIGGRAPH Asia 2024 paper](https://dl.acm.org/doi/10.1145/3681758.3697990), which documents the algorithm behind the OLM Smoother tool used in professional anime production. V2 adds T/cross-shape handling, diagonal line detection, sRGB gamma-correct blending, smoothness control, and U-shape rounding. All V2 features are on by default. Pass `--classic` to run V1 only.
 
+### Deviations from the OLM 2024 paper
+
+Two V2 features are implemented as simplified single-knob versions of what the paper describes. They capture the spirit of each feature with a smaller API surface; the paper-faithful variants are on the roadmap.
+
+- **Extended gamma** (`--extended-gamma`): applied globally to every blend in linear-light space. Paper §3 specifies a user-defined list of "trigger" colors and applies the power law only when blending matches one (intended to target thin black strokes specifically). The global version still has the strongest effect on dark pixels and a mild one on bright pixels, so in practice it behaves similarly for typical cel-art inputs.
+- **Smoothness** (`--smoothness`, range 0.0–2.0): a single knob. Values <1 sharpen, =1 is the paper default, >1 enables an extra-smooth mode that extends the reconstructed L-shape beyond the detected edge segment. Paper §4 splits this into two parameters: `smoothness ∈ [0, 1]` (down-scale) and `extra_smoothness ∈ [0, N]` (up-scale via edge line length).
+
 ## Features
 
 - **T/Cross shapes** - correct handling of line intersections and T-junctions
@@ -153,6 +160,8 @@ celsmooth::mlaa_process(pixels_rgba, output_rgba, width, height, width * 4, para
 - **SIMD/AVX intrinsics** - vectorized edge detection and blending for further CPU speedup
 - **GPU acceleration** - GLSL/HLSL compute shader port for real-time use in game engines and compositing software
 - **Bilateral polish pass** - optional second pass to smooth residual noise without blurring edges
+- **Per-color extended-gamma list** - paper-faithful §3 implementation where extended gamma only applies to a user-supplied list of trigger colors (currently applied globally during blending)
+- **Split smoothness parameters** - paper-faithful §4 implementation with separate `smoothness ∈ [0,1]` (down-scale) and `extra_smoothness ∈ [0,N]` (up-scale) knobs (currently folded into one `[0,2]` knob)
 
 ## Acknowledgements
 

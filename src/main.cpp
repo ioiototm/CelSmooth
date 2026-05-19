@@ -108,7 +108,7 @@ static bool save_png_srgb(const char* path, int w, int h, int comp, const void* 
 
 static void print_usage(const char* prog) {
     fprintf(stderr,
-        "CelSmooth v0.2.0 — Morphological Anti-Aliasing for cel art\n"
+        "CelSmooth v" CELSMOOTH_VERSION " — Morphological Anti-Aliasing for cel art\n"
         "\n"
         "Usage: %s <input.png> <output.png> [options]\n"
         "\n"

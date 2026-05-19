@@ -300,7 +300,11 @@ void mlaa_compute_blend_weights(
             eff_p = eff_p * params.smoothness;
         if (eff_p < 1.0f) eff_p = 1.0f;
 
-        for (int i = 0; i < p; ++i) {
+        // Extra-smoothing (paper §4 / Fig 16): when smoothness>1, extend the
+        // affected pixel range, not just the trapezoid denominator.
+        int p_iter = std::max(p, static_cast<int>(std::round(eff_p)));
+
+        for (int i = 0; i < p_iter; ++i) {
             float area = (2.0f * eff_p - 2.0f * i - 1.0f) / (4.0f * eff_p);
             float w = area * strength;
 
@@ -396,10 +400,16 @@ static inline uint8_t blend_channel(uint8_t a, uint8_t b, float t) {
     return static_cast<uint8_t>(std::min(std::max(result + 0.5f, 0.0f), 255.0f));
 }
 
-static inline uint8_t blend_channel_linear(uint8_t a, uint8_t b, float t) {
+static inline uint8_t blend_channel_linear(uint8_t a, uint8_t b, float t, float gamma) {
     float la = srgb_to_linear(a);
     float lb = srgb_to_linear(b);
+    if (gamma != 1.0f) {
+        la = std::pow(la, gamma);
+        lb = std::pow(lb, gamma);
+    }
     float result = la * (1.0f - t) + lb * t;
+    if (gamma != 1.0f)
+        result = std::pow(result, 1.0f / gamma);
     return linear_to_srgb(result);
 }
 
@@ -411,10 +421,12 @@ void mlaa_apply_blending(
     const MlaaParams& params)
 {
     bool use_gamma = params.enable_gamma && !params.classic_mode;
+    float ext_gamma = use_gamma ? params.extended_gamma : 1.0f;
     if (use_gamma) init_srgb_lut();
 
-    auto blend = [use_gamma](uint8_t a, uint8_t b, float t) -> uint8_t {
-        return use_gamma ? blend_channel_linear(a, b, t) : blend_channel(a, b, t);
+    auto blend = [use_gamma, ext_gamma](uint8_t a, uint8_t b, float t) -> uint8_t {
+        return use_gamma ? blend_channel_linear(a, b, t, ext_gamma)
+                         : blend_channel(a, b, t);
     };
 
     #ifdef CELSMOOTH_OPENMP

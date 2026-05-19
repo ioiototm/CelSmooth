@@ -730,7 +730,7 @@ static bool init_app(int argc, char* argv[]) {
     }
 
     g_window = SDL_CreateWindow(
-        "CelSmooth v0.3.1",
+        "CelSmooth v" CELSMOOTH_VERSION,
         1280, 800,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!g_window) {
